@@ -1,4 +1,4 @@
-class Value<T = unknown> {
+export class Value<T = unknown> {
     constructor(public value: T, public name: string) {}
 }
 
@@ -24,16 +24,16 @@ function fromDefaultValue(obj: unknown, json: unknown, path: string): unknown {
                 throw new Error(`defaultValue of the array should be present: ${path}`);
             }
             if (Array.isArray(json)) {
-                return new Value(json.map((val, i) => fromDefaultValue(defaultChild, val, path + '[' + i + ']')), path);
+                return new Value(json.map((val, i) => fromDefaultValue(defaultChild, val, keyName(path, i))), path);
             } else {
                 return new Value([], path);
             }
         }
         if (obj instanceof Date) {
-            if (typeof json !== 'string') {
+            if (json !== undefined && typeof json !== 'string') {
                 throw new Error(`json value is not a date string: ${json}, ${path}`);
             }
-            return new Value(json !== undefined ? new Date(json) : new Date(obj.getTime()), path);
+            return new Value(json !== undefined ? new Date(json as string) : new Date(obj.getTime()), path);
         }
         if (json !== undefined && !isObj(json)) {
             throw new Error(`json value should be an object: ${json}, ${path}`);
@@ -62,6 +62,12 @@ function fromDefaultValue(obj: unknown, json: unknown, path: string): unknown {
     }
     return new Value(obj, path);
 }
+
+export function rootToJson() {
+    const {multi, single} = getRootMap();
+    return toJson({multi, single});
+}
+
 function toJson(obj: unknown): unknown {
     if (isObj(obj)) {
         if (obj instanceof Value) return toJson(obj.value);
@@ -70,9 +76,10 @@ function toJson(obj: unknown): unknown {
             return obj.map(toJson);
         }
         const newObj: {[key: string]: unknown} = {};
-        if (obj instanceof LazyMap || obj instanceof HashMap) {
+        if (obj instanceof Map || obj instanceof LazyMap || obj instanceof HashMap) {
+            const map = obj instanceof Map ? obj : ((obj as unknown) as {map: Map<string, unknown>}).map;
             const newObj: {[key: string]: unknown} = {};
-            for (const [key, value] of ((obj as unknown) as {map: Map<string, unknown>}).map) {
+            for (const [key, value] of map) {
                 newObj[key] = toJson(value);
             }
             return newObj;
@@ -88,17 +95,28 @@ const rootJsonMap = new Map<
     string,
     {
         json?: {single: {[name: string]: unknown}; multi: {[name: string]: {[key: string]: unknown}}};
-        multi: Map<string, Map<string | number, unknown>>;
+        multi: Map<string, Map<string, unknown>>;
         single: Map<string, unknown>;
     }
 >();
 
 function getRootMap() {
     // const component = getCurrentComponent();
-    return rootJsonMap.get({} as never)!;
+    return rootJsonMap.get('1')!;
 }
 
-function make<T>(stateName: string, defaultValue: T) {
+export function Provider(json?: {
+    single: {[name: string]: unknown};
+    multi: {[name: string]: {[key: string]: unknown}};
+}) {
+    return rootJsonMap.set('1', {
+        json: json,
+        single: new Map(),
+        multi: new Map(),
+    });
+}
+
+export function make<T>(stateName: string, defaultValue: T) {
     type Result = ToValue<T>;
     return {
         single(): ToValue<T> {
@@ -121,16 +139,16 @@ function make<T>(stateName: string, defaultValue: T) {
                     const json = rootMap.json.multi[stateName];
                     if (json !== undefined) {
                         for (const k in json) {
-                            multiMap.set(k, fromDefaultValue(defaultValue, json[k], stateName + '[' + k + ']'));
+                            multiMap.set(k, fromDefaultValue(defaultValue, json[k], keyName(stateName, key)));
                         }
                     }
                 }
                 rootMap.multi.set(stateName, multiMap);
             }
-            const existValue = multiMap.get(key) as Result;
+            const existValue = multiMap.get(String(key)) as Result;
             if (existValue === undefined) {
-                const value = fromDefaultValue(defaultValue, undefined, stateName) as Result;
-                multiMap.set(key, value);
+                const value = fromDefaultValue(defaultValue, undefined, keyName(stateName, key)) as Result;
+                multiMap.set(String(key), value);
                 return value;
             }
             return existValue;
@@ -138,62 +156,71 @@ function make<T>(stateName: string, defaultValue: T) {
     };
 }
 
-class HashMap<T> {
-    protected map = new Map<string | number, ToValue<T>>();
+export class HashMap<T> {
+    protected map = new Map<string, ToValue<T>>();
     protected version: Value<number>;
     constructor(public defaultValue: T, protected path?: string, json?: object) {
         this.version = new Value(0, path!);
         if (json !== undefined) {
             for (const key in json) {
-                this.map.set(key, json[key as never]);
+                this.map.set(key, fromDefaultValue(
+                    defaultValue,
+                    json[key as never],
+                    keyName(this.path!, key),
+                ) as ToValue<T>);
             }
         }
     }
     get(key: string | number): ToValue<T> {
         this.version.value;
-        const existsValue = this.map.get(key);
+        const existsValue = this.map.get(String(key));
         if (existsValue === undefined) {
-            const value = fromDefaultValue(this.defaultValue, undefined, this.path!) as ToValue<T>;
-            this.map.set(key, value);
+            const value = fromDefaultValue(this.defaultValue, undefined, keyName(this.path!, key)) as ToValue<T>;
+            this.map.set(String(key), value);
             return value;
         }
         return existsValue;
     }
     set(key: string | number, value: ToValue<T>) {
-        this.map.set(key, value);
+        this.map.set(String(key), value);
         this.version.value++;
         return this;
     }
     has(key: string | number) {
         this.version.value;
-        return this.map.has(key);
+        return this.map.has(String(key));
     }
     delete(key: string | number) {
         this.version.value++;
-        return this.map.delete(key);
+        return this.map.delete(String(key));
     }
 }
-interface ValueMap {
-    path: string;
-}
-class LazyMap<T> {
-    protected map = new Map<string | number, ToValue<T>>();
+export class LazyMap<T> {
+    protected map = new Map<string, ToValue<T>>();
     constructor(public defaultValue: T, protected path?: string, json?: object) {
         if (json !== undefined) {
             for (const key in json) {
-                this.map.set(key, json[key as never]);
+                this.map.set(key, fromDefaultValue(
+                    defaultValue,
+                    json[key as never],
+                    keyName(this.path!, key),
+                ) as ToValue<T>);
             }
         }
     }
     get(key: string | number): ToValue<T> {
-        const existsValue = this.map.get(key);
+        const existsValue = this.map.get(String(key));
         if (existsValue === undefined) {
-            const value = fromDefaultValue(this.defaultValue, undefined, this.path!) as ToValue<T>;
-            this.map.set(key, value);
+            const value = fromDefaultValue(this.defaultValue, undefined, keyName(this.path!, key)) as ToValue<T>;
+            this.map.set(String(key), value);
             return value;
         }
         return existsValue;
     }
+}
+
+function keyName(path: string, key: string | number) {
+    return path + '[' + key + ']';
 }
 
 // class BoxedHashMap<T> extends BaseHashMap<ToValue<T>> {
@@ -202,25 +229,3 @@ class LazyMap<T> {
 //         super();
 //     }
 // }
-
-const state = make('filter', {
-    activeFilterId: 1,
-    price: {
-        from: 0,
-        to: 0,
-    },
-    rangeFilters: new LazyMap({from: 0, to: 0}),
-    rangeArrayFilters: new LazyMap([{from: 0, to: 0}]),
-    booleanFilters: new LazyMap(false),
-    radioFilters: new LazyMap([0]),
-});
-
-function Foo() {
-    const {radioFilters, rangeFilters, booleanFilters, rangeArrayFilters} = state.single();
-    var arr = rangeArrayFilters.get('12');
-    arr.value[0].from.value += 1;
-    booleanFilters.get(123);
-    const x = radioFilters.get('1324');
-    rangeFilters.get('123').from;
-    x.value = [];
-}

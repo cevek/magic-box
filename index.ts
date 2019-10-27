@@ -219,6 +219,29 @@ export class LazyMap<T> {
     }
 }
 
+export function debounce<T>(value: Value<T>, ms: number) {
+    let timeout: number;
+    const onSet = (newValue: T) => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => {
+            value.value = newValue;
+        }, 1000);
+    };
+    return new Value(value.value, value.name);
+}
+
+export function throttle<T>(value: Value<T>, ms: number) {
+    let lastSettedTime = 0;
+    const onSet = (newValue: T) => {
+        const now = Date.now();
+        if (lastSettedTime + ms < now) {
+            lastSettedTime = now;
+            value.value = newValue;
+        }
+    };
+    return new Value(value.value, value.name);
+}
+
 function keyName(path: string, key: string | number) {
     return path + '[' + key + ']';
 }
